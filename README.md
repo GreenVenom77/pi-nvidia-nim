@@ -33,12 +33,6 @@ pi install git:github.com/GreenVenom77/pi-nvidia-nim-reimagined
 
 Then restart Pi or run `/reload`, and pick a model from provider `nvidia-nim` with `/model`.
 
-Pin a release (git tags and commits are pinned; updates do not move a configured ref):
-
-```bash
-pi install git:github.com/GreenVenom77/pi-nvidia-nim-reimagined@v0.6.0
-```
-
 Manage it:
 
 ```bash
