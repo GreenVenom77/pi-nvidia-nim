@@ -9,6 +9,11 @@ import {
   isChatModelId,
   matchFreeIds,
   parseCardContext,
+  parseIdList,
+  parseExtraModels,
+  parseCardModelId,
+  parseApiUnavailable,
+  type ModelOverrides,
   parseCatalogRoutes,
   parseModelsDev,
   mapNimTopLevelReasoning,
@@ -49,9 +54,11 @@ type Cache = {
   all?: { savedAt: string; models: any[] };
   meta?: { savedAt: string; entries: Record<string, ModelMeta> };
   /** Context length read from each model's page on build.nvidia.com. `ctx` undefined = page has none. */
-  cards?: Record<string, { ctx?: number; at: number }>;
+  cards?: Record<string, { ctx?: number; blocked?: boolean; at: number }>;
   /** What NVIDIA's API reference page says about switching thinking. `spec` undefined = page says nothing usable. */
   docs?: Record<string, { spec?: NimDocSpec; at: number }>;
+  /** Catalog routes /v1/models does not list, resolved to the id the model page uses. `verified` = read from the page, not guessed. */
+  resolved?: Record<string, { id: string; verified: boolean; at: number }>;
 };
 
 type Diagnostics = {
@@ -68,6 +75,10 @@ type Diagnostics = {
   freeRoutes: number;
   freeMatched: number;
   freeUnmatched: string[];
+  /** Chat-looking models on NVIDIA's free list that /v1/models does not return, with the likely API id. */
+  catalogOnly: string[];
+  /** Models whose own page says API access is not available (preview/playground only); not offered. */
+  apiUnavailable: string[];
   warnings: string[];
   reasoningModels: number;
   /** Reasoning models with no known thinking switch: the level selector changes nothing for them. */
@@ -76,7 +87,13 @@ type Diagnostics = {
   thinkingFromDocs: string[];
 };
 
-let freeModelsOnly = true;
+// NVIDIA's /v1/models is the source of truth for what can be called. The free-endpoint filter is an opt-in
+// refinement that scrapes a website, so it is OFF unless the settings file says exactly `true`.
+let freeModelsOnly = false;
+let overrides: ModelOverrides = {};
+let extraModelIds: string[] = [];
+// Opt-in: also consult the build.nvidia.com catalog for models /v1/models does not list. (The free filter implies it.)
+let catalogFallback = false;
 let normalizeThinking = true;
 let thinkingOverrideCount = 0;
 let cache: Cache = { version: 3 };
@@ -198,8 +215,10 @@ let rawSettings: Record<string, unknown> = {};
 async function loadSettings(): Promise<void> {
   const parsed = await readJson<Record<string, unknown>>(SETTINGS_PATH);
   rawSettings = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-  // Free-only is ON unless the file says exactly `false`. A missing, empty or malformed file keeps it on.
-  freeModelsOnly = rawSettings.freeModelsOnly !== false;
+  freeModelsOnly = rawSettings.freeModelsOnly === true;
+  extraModelIds = parseExtraModels(rawSettings.extraModels);
+  catalogFallback = rawSettings.catalogFallback === true;
+  overrides = { show: parseIdList(rawSettings.show), hide: parseIdList(rawSettings.hide) };
   normalizeThinking = rawSettings.normalizeThinking !== false;
   thinkingOverrideCount = setThinkingOverrides(rawSettings.thinking);
 }
@@ -263,8 +282,9 @@ async function fetchFreeRoutes(signal: AbortSignal): Promise<Set<string>> {
   }
   // A full page may mean there is another one. If the server ignores the page
   // parameter, page 2 adds nothing and we stop.
-  if (routes.size >= 90) {
-    for (let page = 2; page <= 4; page++) {
+  // Always probe page 2: a filtered/short first page can still have more (new models are often listed late).
+  {
+    for (let page = 2; page <= 5; page++) {
       try {
         const more = parseCatalogRoutes(await fetchCatalogPage(`${FREE_MODELS_URL}&page=${page}`, signal));
         const before = routes.size;
@@ -305,8 +325,9 @@ const DAY_MS = 86_400_000;
  * One model page. Returns a number, `undefined` (page exists but states no
  * context length, or does not exist), or "error" (transient; do not cache).
  */
-async function fetchCardContext(id: string, route: string | undefined, signal: AbortSignal): Promise<number | undefined | "error"> {
+async function fetchCardContext(id: string, route: string | undefined, signal: AbortSignal): Promise<{ ctx?: number; blocked?: boolean } | "error"> {
   const paths = cardPaths(id, route);
+  let ctx: number | undefined;
   for (const path of paths) {
     let response: Response;
     try {
@@ -319,10 +340,13 @@ async function fetchCardContext(id: string, route: string | undefined, signal: A
     }
     if (response.status === 404) continue;
     if (!response.ok) return "error";
-    const context = parseCardContext(await response.text());
-    if (context) return context;
+    const text = await response.text();
+    // A page that says API access is unavailable settles it, whatever else it states.
+    if (parseApiUnavailable(text)) return { blocked: true };
+    ctx ??= parseCardContext(text);
+    if (ctx) return { ctx };
   }
-  return undefined;
+  return { ctx };
 }
 
 /**
@@ -334,7 +358,7 @@ async function loadCardContexts(
   ids: string[],
   routeById: Map<string, string>,
   signal: AbortSignal,
-): Promise<{ contexts: Record<string, number>; fetched: number }> {
+): Promise<{ contexts: Record<string, number>; fetched: number; blocked: Set<string> }> {
   const cards = (cache.cards ??= {});
   const now = Date.now();
   const todo = ids.filter((id) => {
@@ -353,17 +377,19 @@ async function loadCardContexts(
         errors++;
         continue;
       }
-      cards[id] = { ctx: result, at: now };
+      cards[id] = { ...result, at: now };
       fetched++;
     }
   };
   await Promise.all(Array.from({ length: CARD_CONCURRENCY }, worker));
   const contexts: Record<string, number> = {};
+  const blocked = new Set<string>();
   for (const id of ids) {
     const ctx = cards[id]?.ctx;
     if (ctx) contexts[id] = ctx;
+    if (cards[id]?.blocked) blocked.add(id);
   }
-  return { contexts, fetched };
+  return { contexts, fetched, blocked };
 }
 
 function withCardContexts(meta: Record<string, ModelMeta>, contexts: Record<string, number>): Record<string, ModelMeta> {
@@ -375,45 +401,161 @@ function withCardContexts(meta: Record<string, ModelMeta>, contexts: Record<stri
   return merged;
 }
 
+/**
+ * The route's API id. NVIDIA's website sometimes lists a model before /v1/models does, so read the id from the
+ * model page's code sample; if the page does not state it, fall back to the route with "_" read as ".".
+ */
+async function resolveRouteId(route: string, signal: AbortSignal): Promise<{ id: string; verified: boolean } | "error"> {
+  const guess = route.replace(/_/g, ".");
+  for (const path of [route, route.replace(/[._]/g, "-")]) {
+    try {
+      const response = await fetch(`https://build.nvidia.com/${path}.md`, {
+        headers: { Accept: "text/markdown,text/plain,*/*", "User-Agent": BROWSER_UA },
+        signal,
+      });
+      if (response.status === 404) continue;
+      if (!response.ok) return "error";
+      const id = parseCardModelId(await response.text(), route);
+      if (id) return { id, verified: true };
+    } catch {
+      return "error";
+    }
+  }
+  return { id: guess, verified: false };
+}
+
+/** Add the catalog's chat models that /v1/models does not return. Returns the ids added, and route -> id for each. */
+async function addCatalogOnlyModels(
+  unmatched: string[],
+  apiModels: NimApiModel[],
+  signal: AbortSignal,
+  diagnostics: Diagnostics,
+): Promise<{ ids: Set<string>; routeById: Map<string, string> }> {
+  const resolvedCache = (cache.resolved ??= {});
+  const now = Date.now();
+  const have = new Set(apiModels.map((model) => model.id?.trim().toLowerCase()));
+  const ids = new Set<string>();
+  const routeById = new Map<string, string>();
+  const routes = unmatched.filter(isChatModelId);
+  const budget = deadline(signal, CARD_BUDGET_MS);
+  await Promise.all(
+    routes.map(async (route) => {
+      let entry = resolvedCache[route];
+      // A guessed id is rechecked after a day (the page may gain a code sample); a verified one after a week.
+      if (!entry || now - entry.at > (entry.verified ? 7 : 1) * DAY_MS) {
+        const result = await resolveRouteId(route, budget);
+        if (result !== "error") entry = resolvedCache[route] = { ...result, at: now };
+      }
+      if (!entry) return;
+      routeById.set(entry.id, route);
+      ids.add(entry.id);
+      if (!have.has(entry.id.toLowerCase())) {
+        have.add(entry.id.toLowerCase());
+        apiModels.push({ id: entry.id });
+      }
+      diagnostics.catalogOnly.push(`${route} -> ${entry.id}${entry.verified ? "" : " (id guessed)"}`);
+    }),
+  );
+  return { ids, routeById };
+}
+
 async function discoverModels(signal: AbortSignal): Promise<{ models: any[]; apiKey: string | undefined }> {
   const apiKey = await getApiKey();
+  // 1. NVIDIA's API is the primary list of what can be called.
   const apiModels = await fetchApiModels(apiKey, signal);
-  const ids = apiModels.map((model) => model.id?.trim()).filter((id): id is string => Boolean(id));
-  const chatIds = ids.filter(isChatModelId);
+  // Models the user declared by hand. Always shown.
+  const listed = new Set(apiModels.map((model) => model.id?.trim().toLowerCase()));
+  for (const id of extraModelIds) {
+    if (listed.has(id.toLowerCase())) continue;
+    apiModels.push({ id });
+    overrides.show?.add(id.toLowerCase());
+  }
   const warnings: string[] = [];
-  const { meta, source: metaSource } = await loadMeta(signal, warnings);
-
   const diagnostics: Diagnostics = {
     at: new Date().toISOString(),
     mode: freeModelsOnly ? "free-only" : "all",
-    apiCount: ids.length,
-    chatCount: chatIds.length,
-    hiddenNonChat: ids.filter((id) => !isChatModelId(id)),
-    metaSource,
-    metaMatched: chatIds.filter((id) => meta[id.toLowerCase()]?.context).length,
+    apiCount: 0,
+    chatCount: 0,
+    hiddenNonChat: [],
+    metaSource: "none",
+    metaMatched: 0,
     cardsKnown: 0,
     cardsFetched: 0,
     freeSource: "off",
     freeRoutes: 0,
     freeMatched: 0,
     freeUnmatched: [],
+    catalogOnly: [],
+    apiUnavailable: [],
     warnings,
     reasoningModels: 0,
     thinkingObserveOnly: [],
     thinkingFromDocs: [],
   };
 
-  const withCards = async (candidates: string[], routeById: Map<string, string>) => {
-    const { contexts, fetched } = await loadCardContexts(candidates, routeById, signal);
+  // 2. The website catalog is the fallback for models the API does not list (yet). Best effort in "all" mode.
+  let routes: Set<string> | undefined;
+  let catalogError: unknown;
+  const useCatalog = freeModelsOnly || catalogFallback;
+  if (useCatalog) {
+    try {
+      routes = await fetchFreeRoutes(signal);
+    } catch (error) {
+      catalogError = error;
+    }
+  }
+  let matched = new Set<string>();
+  let routeById = new Map<string, string>();
+  if (routes) {
+    const result = matchFreeIds(routes, apiModels.map((model) => model.id?.trim() ?? "").filter(Boolean));
+    matched = result.matched;
+    routeById = result.routeById;
+    diagnostics.freeSource = "live";
+    diagnostics.freeRoutes = routes.size;
+    diagnostics.freeUnmatched = result.unmatched;
+    const extra = await addCatalogOnlyModels(result.unmatched, apiModels, signal, diagnostics);
+    extra.ids.forEach((id) => matched.add(id));
+    extra.routeById.forEach((route, id) => routeById.set(id, route));
+  } else if (useCatalog && !freeModelsOnly) {
+    diagnostics.freeSource = "cache";
+    warnings.push(`Free catalog unavailable (${message(catalogError)}); models missing from /v1/models are not added.`);
+    // Reuse catalog-only models resolved earlier.
+    for (const [route, entry] of Object.entries(cache.resolved ?? {})) {
+      if (listed.has(entry.id.toLowerCase())) continue;
+      apiModels.push({ id: entry.id });
+      routeById.set(entry.id, route);
+      diagnostics.catalogOnly.push(`${route} -> ${entry.id} (cached)`);
+    }
+  }
+
+  const ids = apiModels.map((model) => model.id?.trim()).filter((id): id is string => Boolean(id));
+  const chatIds = ids.filter((id) => isChatModelId(id) || overrides.show?.has(id.toLowerCase()));
+  const { meta, source: metaSource } = await loadMeta(signal, warnings);
+  diagnostics.apiCount = ids.length;
+  diagnostics.chatCount = chatIds.length;
+  diagnostics.hiddenNonChat = ids.filter((id) => !isChatModelId(id));
+  diagnostics.metaSource = metaSource;
+  diagnostics.metaMatched = chatIds.filter((id) => meta[id.toLowerCase()]?.context).length;
+
+  // Models whose page says they cannot be called. An explicit "show" in the settings still wins.
+  let blockedIds = new Set<string>();
+  const withCards = async (candidates: string[]) => {
+    const { contexts, fetched, blocked } = await loadCardContexts(candidates, routeById, signal);
     diagnostics.cardsKnown = Object.keys(contexts).length;
     diagnostics.cardsFetched = fetched;
+    blockedIds = new Set([...blocked].filter((id) => !overrides.show?.has(id.toLowerCase())));
+    diagnostics.apiUnavailable = [...blockedIds];
     return withCardContexts(meta, contexts);
   };
+  const effectiveOverrides = (): ModelOverrides => ({
+    show: overrides.show,
+    hide: new Set([...(overrides.hide ?? []), ...[...blockedIds].map((id) => id.toLowerCase())]),
+  });
 
   if (!freeModelsOnly) {
-    const allMeta = await withCards(chatIds, new Map());
+    const allMeta = await withCards(chatIds);
     await loadThinkingDocs(chatIds, allMeta, signal, diagnostics);
-    const models = toPiModels(apiModels, undefined, allMeta);
+    const models = toPiModels(apiModels, undefined, allMeta, effectiveOverrides());
     cache.all = { savedAt: diagnostics.at, models };
     await saveCache();
     await finish(diagnostics, models);
@@ -422,31 +564,24 @@ async function discoverModels(signal: AbortSignal): Promise<{ models: any[]; api
 
   // Free-only mode fails closed: never show unknown models as free.
   let freeIds: Set<string>;
-  let routeById = new Map<string, string>();
-  try {
-    const routes = await fetchFreeRoutes(signal);
-    const { matched, unmatched, routeById: routesFound } = matchFreeIds(routes, ids);
-    routeById = routesFound;
-    diagnostics.freeSource = "live";
-    diagnostics.freeRoutes = routes.size;
-    diagnostics.freeUnmatched = unmatched;
+  if (routes) {
     if (matched.size === 0) {
       throw new Error(`Found ${routes.size} catalog entries but none matched /v1/models ids.`);
     }
     freeIds = matched;
-  } catch (error) {
+  } else {
     const saved = cache.free?.ids;
-    if (!saved?.length) throw error;
+    if (!saved?.length) throw catalogError;
     // Reuse the last known free list against today's live API model list.
     diagnostics.freeSource = "cache";
-    diagnostics.warnings.push(`Free catalog unavailable (${message(error)}); using the last known free list.`);
+    diagnostics.warnings.push(`Free catalog unavailable (${message(catalogError)}); using the last known free list.`);
     freeIds = new Set(saved);
   }
 
-  const freeChatIds = chatIds.filter((id) => freeIds.has(id));
-  const finalMeta = await withCards(freeChatIds, routeById);
+  const freeChatIds = ids.filter((id) => (freeIds.has(id) && isChatModelId(id)) || overrides.show?.has(id.toLowerCase()));
+  const finalMeta = await withCards(freeChatIds);
   await loadThinkingDocs(freeChatIds, finalMeta, signal, diagnostics);
-  const models = toPiModels(apiModels, freeIds, finalMeta);
+  const models = toPiModels(apiModels, freeIds, finalMeta, effectiveOverrides());
   if (models.length === 0) throw new Error("No chat models remained after applying the free-endpoint filter.");
   diagnostics.freeMatched = freeIds.size;
   if (diagnostics.freeSource === "live") {
@@ -649,6 +784,26 @@ export default async function (pi: ExtensionAPI) {
     },
   });
 
+  pi.registerCommand("nim-catalog", {
+    description: "Toggle the build.nvidia.com catalog fallback for models /v1/models does not list (usage: /nim-catalog [on|off])",
+    handler: async (args, ctx) => {
+      const arg = String(args ?? "").trim().toLowerCase();
+      const previous = catalogFallback;
+      catalogFallback = arg === "on" ? true : arg === "off" ? false : !previous;
+      try {
+        rawSettings = { ...rawSettings, catalogFallback };
+        await saveSettings();
+        await reload(ctx, (count) => `NVIDIA NIM: catalog fallback ${catalogFallback ? "ON" : "OFF"} · ${count} models loaded`);
+      } catch (error) {
+        catalogFallback = previous;
+        rawSettings = { ...rawSettings, catalogFallback: previous };
+        await saveSettings().catch(() => {});
+        lastError = message(error);
+        ctx.ui.notify(`NVIDIA NIM catalog change failed (kept ${previous ? "ON" : "OFF"}): ${lastError}`, "error");
+      }
+    },
+  });
+
   pi.registerCommand("nim-refresh", {
     description: "Fetch the latest NVIDIA NIM model catalog",
     handler: async (_args, ctx) => {
@@ -668,6 +823,7 @@ export default async function (pi: ExtensionAPI) {
       const d = lastDiagnostics;
       const lines = [
         `Filter: free models only ${freeModelsOnly ? "ON" : "OFF"}`,
+        `Catalog fallback (models missing from /v1/models): ${catalogFallback || freeModelsOnly ? "ON" : "OFF"}${freeModelsOnly && !catalogFallback ? " (implied by the free filter)" : ""}`,
         `Registered models: ${registeredModels.length}`,
         `Last successful refresh: ${lastRefreshAt ? lastRefreshAt.toLocaleString() : "never"}`,
       ];
@@ -695,6 +851,15 @@ export default async function (pi: ExtensionAPI) {
           );
         }
         d.warnings.forEach((warning) => lines.push(`Warning: ${warning}`));
+        if (d.apiUnavailable?.length) {
+          lines.push(`Hidden because their page says API access is not available (preview/playground only) (${d.apiUnavailable.length}): ${d.apiUnavailable.slice(0, 8).join(", ")}`);
+        }
+        if (d.catalogOnly?.length) {
+          lines.push(
+            `Added from NVIDIA's catalog because /v1/models does not list them (${d.catalogOnly.length}): ${d.catalogOnly.slice(0, 8).join(", ")}`,
+            `An "(id guessed)" entry could not be confirmed from its page; if it fails, set the exact id under "extraModels" in ${SETTINGS_PATH}.`,
+          );
+        }
         if (d.freeUnmatched.length) lines.push(`Unmatched (first 5): ${d.freeUnmatched.slice(0, 5).join(", ")}`);
         lines.push(`Diagnostics file: ${DEBUG_PATH}`);
       }

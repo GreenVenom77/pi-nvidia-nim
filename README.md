@@ -1,13 +1,13 @@
 # pi-nvidia-nim-reimagined
 
-NVIDIA NIM provider for [Pi](https://pi.dev) with live model discovery, a free-endpoint filter that is **on by default**, accurate context windows, and thinking levels that actually work.
+NVIDIA NIM provider for [Pi](https://pi.dev) with live model discovery, an optional free-endpoint filter, accurate context windows, and thinking levels that actually work.
 
 ## Features
 
 **Models**
 - Lists models live from `https://integrate.api.nvidia.com/v1/models`. Listing needs no API key.
 - Hides non-chat models (embeddings, rerankers, speech, image, biology, guard models).
-- **Free-endpoint filter, on by default.** Reads NVIDIA Build's *Free Endpoint* catalog and keeps only models that appear there. If it cannot confirm which models are free, it reuses the last known free list; with no list at all it shows nothing rather than guessing. Only an explicit `"freeModelsOnly": false` turns it off.
+- **NVIDIA's API is the source of truth.** Every chat-capable model from `/v1/models` is listed, so a new release such as `moonshotai/kimi-k3.1-pro` appears as soon as NVIDIA publishes it. The optional free-endpoint filter (`/nim-free on`, or `"freeModelsOnly": true`) scrapes build.nvidia.com and is best effort. Pin exceptions in `~/.pi/agent/nvidia-nim.json` with `"show": ["vendor/model"]` (always list, even when the filter or the non-chat heuristic would drop it) and `"hide": [...]`.
 - **Correct context length.** Read from each model's build.nvidia.com page (the figure the site shows), then models.dev, then a 128k default. Output limits and image support come from models.dev.
 - Instant startup: the cached list registers immediately and refreshes in the background. First run waits once.
 
@@ -86,7 +86,8 @@ Override example (add `"effort": true` to also send top-level `reasoning_effort`
 
 | Command | Description |
 | --- | --- |
-| `/nim-free [on\|off]` | Set or toggle free-only filtering (default ON). Saved in `~/.pi/agent/nvidia-nim.json`. |
+| `/nim-free [on\|off]` | Set or toggle the optional free-only filter (default OFF). Saved in `~/.pi/agent/nvidia-nim.json`. |
+| `/nim-catalog [on\|off]` | Opt in/out of the website-catalog fallback for models `/v1/models` does not list (default OFF). |
 | `/nim-refresh` | Re-fetch the model list and free catalog. |
 | `/nim-models` | Filter status, counts, thinking coverage, warnings, last error, registered model ids. |
 
@@ -94,7 +95,7 @@ Every refresh also writes `~/.pi/agent/nvidia-nim-debug.json` (counts, unmatched
 
 ## Troubleshooting
 
-- **No models appear:** run `/nim-models`. If the error mentions the free catalog, run `/nim-free off` to list all chat models, and check the debug file.
+- **No models appear:** run `/nim-models`. If the error mentions the free catalog, run `/nim-free off`, or add the id to `"show"`, and check the debug file.
 - **Thinking level does nothing for a model:** `/nim-models` lists reasoning models with no known switch. Add one under `"thinking"` as shown above.
 - **A model errors on tool calls or images:** not every NIM model supports tools or vision; pick another.
 - **A chat model is missing:** it may match the non-chat filter. Check `hiddenNonChat` in the debug file.
@@ -110,3 +111,11 @@ Every refresh also writes `~/.pi/agent/nvidia-nim-debug.json` (counts, unmatched
 ```bash
 npm test   # Node 22.18+, no dependencies
 ```
+
+## Models the API doesn't list yet (opt-in)
+
+Off by default. Set `"catalogFallback": true` in `~/.pi/agent/nvidia-nim.json` (or turn the free filter on) and the website sometimes offers a model before `/v1/models` returns it. Those are added automatically from NVIDIA's catalog, with the id and context length read from the model's page; `/nim-models` lists them (an `(id guessed)` entry could not be confirmed from its page). If a guessed id fails, put the exact id from the model's code sample in `"extraModels"` in `~/.pi/agent/nvidia-nim.json` and run `/nim-refresh`.
+
+## Preview-only models
+
+Some models appear in `/v1/models` but their page says API access is not available (preview/playground only). Those are hidden automatically and listed in `/nim-models`; `"show": ["vendor/model"]` overrides.

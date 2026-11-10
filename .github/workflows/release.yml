@@ -1,0 +1,53 @@
+name: Release
+
+# Push a tag like v0.9.1 (see RELEASING.md; `npm run release -- 0.9.1` does it for you).
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+
+      - name: Tests
+        run: npm test
+
+      - name: Tag matches package.json and CHANGELOG has notes for it
+        run: node scripts/release-notes.mjs "${GITHUB_REF_NAME#v}" > RELEASE_NOTES.md
+
+      - name: Build package
+        run: |
+          npm pack
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p "pi-nvidia-nim-$VERSION"
+          tar -xzf "pi-nvidia-nim-$VERSION.tgz" --strip-components=1 -C "pi-nvidia-nim-$VERSION"
+          zip -qr "pi-nvidia-nim-$VERSION.zip" "pi-nvidia-nim-$VERSION"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          FLAGS=""
+          case "$VERSION" in *-*) FLAGS="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" \
+            "pi-nvidia-nim-$VERSION.tgz" "pi-nvidia-nim-$VERSION.zip" \
+            --title "v$VERSION" --notes-file RELEASE_NOTES.md $FLAGS
+
+      # Optional: runs only when an NPM_TOKEN repository secret exists.
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        if: ${{ env.NODE_AUTH_TOKEN != '' }}
+        run: |
+          npm config set //registry.npmjs.org/:_authToken "$NODE_AUTH_TOKEN"
+          case "${GITHUB_REF_NAME#v}" in *-*) TAG="--tag next" ;; *) TAG="" ;; esac
+          npm publish --access public $TAG

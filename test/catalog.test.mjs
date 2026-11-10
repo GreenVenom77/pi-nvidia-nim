@@ -595,3 +595,11 @@ test("normalizeNimSse: reasoning after a tool call stays reasoning; other events
   assert.ok(events.includes(": keep-alive comment"));
   assert.ok(events.at(-1).includes("[DONE]"));
 });
+
+test("kimi k3: route kimi-k3 matches api id kimi-k3.1-pro; family switch applies", async () => {
+  const { matchFreeIds, modelQuirks, isChatModelId } = await import("../src/catalog.ts");
+  const r = matchFreeIds(["moonshotai/kimi-k3"], ["moonshotai/kimi-k3.1-pro", "moonshotai/kimi-k2.6", "other/kimi-k3.1-pro"]);
+  assert.deepEqual([...r.matched], ["moonshotai/kimi-k3.1-pro"]);
+  assert.equal(isChatModelId("moonshotai/kimi-k3.1-pro"), true);
+  assert.equal(modelQuirks("moonshotai/kimi-k3.1-pro").reasoning, true);
+});

@@ -49,6 +49,8 @@ globalThis.fetch = async (url, init = {}) => {
     if (net.cards === "ok") {
       const path = u.slice("https://build.nvidia.com/".length, -3);
       if (path === "z-ai/glm-5.3-flash") return new Response("x\n**Input Context Length (ISL):** 262,144 (256k)\n", { status: 200 });
+      if (path === "moonshotai/kimi-k3_1-pro" && net.kimiPage === "ok") return new Response('x\n**Input Context Length (ISL):** 524,288\n```\n"model": "moonshotai/kimi-k3.1-pro",\n"model": "meta/other-model"\n```', { status: 200 });
+      if (path === "paid/some-model" && net.blockedPage) return new Response("# API access for this model is not available yet.\n# This endpoint is published for preview and playground use only", { status: 200 });
       if (path === "meta/llama-3.3-70b-instruct") return new Response("Context length: 1M tokens", { status: 200 });
       return new Response("not found", { status: 404 });
     }
@@ -61,7 +63,7 @@ globalThis.fetch = async (url, init = {}) => {
   if (u.startsWith("https://build.nvidia.com/models")) {
     if (net.catalog === "blocked") return new Response("denied", { status: 403 });
     if (net.catalog === "empty") return new Response("<html>client rendered</html>", { status: 200 });
-    return new Response(CATALOG_HTML, { status: 200 });
+    return new Response(net.kimiRoute ? CATALOG_HTML.replace("</body>", '<a href="/moonshotai/kimi-k3_1-pro">Kimi</a></body>') : CATALOG_HTML, { status: 200 });
   }
   throw new Error(`unexpected fetch ${u}`);
 };
@@ -85,8 +87,10 @@ const makeCtx = () => {
   return { notes, ui: { notify: (m, t) => notes.push({ m, t }) } };
 };
 const last = (pi) => pi.providers.at(-1).config;
+const freeFilterOn = () => writeFileSync(join(agent, "nvidia-nim.json"), JSON.stringify({ freeModelsOnly: true }));
 
-test("startup: no API key at all still lists models and registers them (free-only, matched, chat-only)", async () => {
+test("startup: no API key at all still lists models and registers them (free filter on, matched, chat-only)", async () => {
+  freeFilterOn();
   net = { api: "ok", catalog: "ok", meta: "ok" };
   const pi = makePi();
   await extension(pi);
@@ -101,6 +105,7 @@ test("startup: no API key at all still lists models and registers them (free-onl
 });
 
 test("auth.json key is used; a rejected key falls back to the public model list", async () => {
+  freeFilterOn();
   writeFileSync(join(agent, "auth.json"), JSON.stringify({ nvidia: { type: "api_key", key: "nvapi-test$key" } }));
   net = { api: "reject-key", catalog: "ok", meta: "ok" };
   const pi = makePi();
@@ -111,6 +116,7 @@ test("auth.json key is used; a rejected key falls back to the public model list"
 });
 
 test("refreshModels returns models and never throws, even when everything is down", async () => {
+  freeFilterOn();
   net = { api: "ok", catalog: "ok", meta: "ok" };
   const pi = makePi();
   await extension(pi);
@@ -123,6 +129,7 @@ test("refreshModels returns models and never throws, even when everything is dow
 });
 
 test("offline at startup: provider is registered from cache", async () => {
+  freeFilterOn();
   net = { api: "down", catalog: "down", meta: "down" };
   const pi = makePi();
   await extension(pi);
@@ -130,6 +137,7 @@ test("offline at startup: provider is registered from cache", async () => {
 });
 
 test("catalog blocked (403): reuses last known free ids against the live API list", async () => {
+  freeFilterOn();
   net = { api: "ok", catalog: "blocked", meta: "ok" };
   const pi = makePi();
   await extension(pi);
@@ -142,6 +150,7 @@ test("catalog blocked (403): reuses last known free ids against the live API lis
 });
 
 test("first run + catalog blocked + no cache: no models, but provider still registers and commands work", async () => {
+  freeFilterOn();
   // brand-new home with no cache
   const fresh = mkdtempSync(join(tmpdir(), "nim-fresh-"));
   mkdirSync(join(fresh, ".pi", "agent"), { recursive: true });
@@ -161,6 +170,7 @@ test("first run + catalog blocked + no cache: no models, but provider still regi
 });
 
 test("/nim-free off lists all chat models; on restores; failure reverts and persists the old value", async () => {
+  freeFilterOn();
   net = { api: "ok", catalog: "ok", meta: "ok" };
   const pi = makePi();
   await extension(pi);
@@ -273,10 +283,10 @@ test("/nim-free keeps hand-edited thinking overrides; /nim-models reports them a
 });
 
 
-test("free-only is ON by default: no settings file, an empty or malformed one, or a non-boolean value", async () => {
+test("the API is the source of truth: default lists every chat model; free filter only on an explicit true", async () => {
   net = { api: "ok", catalog: "ok", meta: "ok", cards: "ok" };
   const file = join(agent, "nvidia-nim.json");
-  for (const content of [undefined, "", "{not json", "[]", JSON.stringify({ freeModelsOnly: "false" }), JSON.stringify({ unrelated: 1 })]) {
+  for (const content of [undefined, "", "{not json", "[]", JSON.stringify({ freeModelsOnly: "true" }), JSON.stringify({ unrelated: 1 })]) {
     if (content === undefined) rmSync(file, { force: true });
     else writeFileSync(file, content);
     const pi = makePi();
@@ -284,15 +294,131 @@ test("free-only is ON by default: no settings file, an empty or malformed one, o
     await pi.start();
     const ctx = makeCtx();
     await pi.commands["nim-models"].handler("", ctx);
-    assert.match(ctx.notes.at(-1).m, /free models only ON/, `content: ${content}`);
+    assert.match(ctx.notes.at(-1).m, /free models only OFF/, `content: ${content}`);
+    assert.ok(last(pi).models.some((m) => m.id === "paid/some-model"), `content: ${content}`);
   }
-  // Only an explicit false turns it off, and toggling keeps the other keys in the file.
-  writeFileSync(file, JSON.stringify({ freeModelsOnly: false, normalizeThinking: false }));
+  // Toggling keeps the other keys in the file.
+  writeFileSync(file, JSON.stringify({ normalizeThinking: false }));
   const pi = makePi();
   await extension(pi);
   await pi.commands["nim-free"].handler("on", makeCtx());
   const saved = JSON.parse(readFileSync(file, "utf8"));
   assert.equal(saved.freeModelsOnly, true);
   assert.equal(saved.normalizeThinking, false);
+  writeFileSync(file, JSON.stringify({ freeModelsOnly: true }));
+});
+
+test("a model the website does not list is still shown by default, and show/hide overrides win over the filter", async () => {
+  net = { api: "ok", catalog: "ok", meta: "ok", cards: "ok" };
+  const file = join(agent, "nvidia-nim.json");
+  writeFileSync(file, JSON.stringify({ hide: ["Z-AI/glm-5.3-flash"] }));
+  const all = makePi();
+  await extension(all);
+  await all.start();
+  const ids = last(all).models.map((m) => m.id);
+  assert.ok(ids.includes("paid/some-model"));
+  assert.ok(!ids.includes("z-ai/glm-5.3-flash"));
+
+  // Free filter on: "show" rescues a model the catalog does not list, even a non-chat-looking id.
+  writeFileSync(file, JSON.stringify({ freeModelsOnly: true, show: ["paid/some-model", "nvidia/nemotron-3.5-embed-8b"] }));
+  const filtered = makePi();
+  await extension(filtered);
+  await filtered.start();
+  const shown = last(filtered).models.map((m) => m.id);
+  assert.ok(shown.includes("paid/some-model"));
+  assert.ok(shown.includes("nvidia/nemotron-3.5-embed-8b"));
+  writeFileSync(file, JSON.stringify({ freeModelsOnly: true }));
+});
+
+test("extraModels adds an id the API does not list; catalog-only routes are suggested in /nim-models", async () => {
+  net = { api: "ok", catalog: "ok", meta: "ok", cards: "ok" };
+  const file = join(agent, "nvidia-nim.json");
+  writeFileSync(file, JSON.stringify({ freeModelsOnly: true, extraModels: ["moonshotai/kimi-k3.1-pro", "bad id"] }));
+  const pi = makePi();
+  await extension(pi);
+  await pi.start();
+  const kimi = last(pi).models.find((m) => m.id === "moonshotai/kimi-k3.1-pro");
+  assert.ok(kimi);
+  assert.equal(kimi.reasoning, true);
+  assert.equal(last(pi).models.some((m) => m.id === "bad id"), false);
+  writeFileSync(file, JSON.stringify({ freeModelsOnly: true }));
+});
+
+test("catalog fallback: a free-catalog model missing from /v1/models is added with its id and context read from its page", async () => {
+  const file = join(agent, "nvidia-nim.json");
+  for (const mode of [true, false]) {
+    writeFileSync(file, JSON.stringify({ freeModelsOnly: mode, catalogFallback: true }));
+    writeFileSync(join(agent, "nvidia-nim-models.json"), JSON.stringify({ version: 3 })); // start from an empty cache
+    net = { api: "ok", catalog: "ok", meta: "ok", cards: "ok", kimiRoute: true, kimiPage: "ok" };
+    const pi = makePi();
+    await extension(pi);
+    await pi.start();
+    const kimi = last(pi).models.find((m) => m.id === "moonshotai/kimi-k3.1-pro");
+    assert.ok(kimi, `freeModelsOnly=${mode}`);
+    assert.equal(kimi.contextWindow, 524288);
+    assert.equal(kimi.reasoning, true);
+    const ctx = makeCtx();
+    await pi.commands["nim-models"].handler("", ctx);
+    assert.match(ctx.notes.at(-1).m, /moonshotai\/kimi-k3_1-pro -> moonshotai\/kimi-k3\.1-pro\n|moonshotai\/kimi-k3_1-pro -> moonshotai\/kimi-k3\.1-pro$/m);
+  }
+  // Page states no id: guessed from the route and flagged; an unrelated id on the page is never taken.
+  writeFileSync(file, JSON.stringify({ freeModelsOnly: false, catalogFallback: true }));
+  writeFileSync(join(agent, "nvidia-nim-models.json"), JSON.stringify({ version: 3 }));
+  net = { api: "ok", catalog: "ok", meta: "ok", cards: "ok", kimiRoute: true, kimiPage: "none" };
+  const pi = makePi();
+  await extension(pi);
+  const ctx = makeCtx();
+  await pi.commands["nim-refresh"].handler("", ctx);
+  assert.ok(last(pi).models.some((m) => m.id === "moonshotai/kimi-k3.1-pro"));
+  const dbg = JSON.parse(readFileSync(join(agent, "nvidia-nim-debug.json"), "utf8"));
+  assert.ok(dbg.catalogOnly.some((e) => /id guessed/.test(e)));
+  writeFileSync(file, JSON.stringify({ freeModelsOnly: true }));
+});
+
+test("models whose page says API access is unavailable are hidden; the catalog is off unless opted in; show overrides", async () => {
+  const file = join(agent, "nvidia-nim.json");
+  writeFileSync(file, JSON.stringify({ freeModelsOnly: false }));
+  writeFileSync(join(agent, "nvidia-nim-models.json"), JSON.stringify({ version: 3 }));
+  net = { api: "ok", catalog: "ok", meta: "ok", cards: "ok", kimiRoute: true, kimiPage: "ok", blockedPage: true };
+  const before = seen.length;
+  const pi = makePi();
+  await extension(pi);
+  await pi.start();
+  assert.ok(!last(pi).models.some((m) => m.id === "paid/some-model"));
+  assert.ok(!last(pi).models.some((m) => m.id === "moonshotai/kimi-k3.1-pro")); // catalog fallback is opt-in
+  assert.ok(!seen.slice(before).some((r) => r.url.startsWith("https://build.nvidia.com/models")));
+  const ctx = makeCtx();
+  await pi.commands["nim-models"].handler("", ctx);
+  assert.match(ctx.notes.at(-1).m, /Hidden because their page says API access is not available.*paid\/some-model/);
+
+  writeFileSync(file, JSON.stringify({ freeModelsOnly: false, show: ["paid/some-model"] }));
+  writeFileSync(join(agent, "nvidia-nim-models.json"), JSON.stringify({ version: 3 }));
+  const pi2 = makePi();
+  await extension(pi2);
+  await pi2.start();
+  assert.ok(last(pi2).models.some((m) => m.id === "paid/some-model"));
+  writeFileSync(file, JSON.stringify({ freeModelsOnly: true }));
+});
+
+test("/nim-catalog toggles the catalog fallback, persists it, keeps other keys, and /nim-models reports it", async () => {
+  const file = join(agent, "nvidia-nim.json");
+  writeFileSync(file, JSON.stringify({ freeModelsOnly: false, hide: ["x/y"] }));
+  writeFileSync(join(agent, "nvidia-nim-models.json"), JSON.stringify({ version: 3 }));
+  net = { api: "ok", catalog: "ok", meta: "ok", cards: "ok", kimiRoute: true, kimiPage: "ok" };
+  const pi = makePi();
+  await extension(pi);
+  const ctx = makeCtx();
+  assert.ok(!last(pi).models.some((m) => m.id === "moonshotai/kimi-k3.1-pro"));
+  await pi.commands["nim-catalog"].handler("on", ctx);
+  assert.match(ctx.notes.at(-1).m, /catalog fallback ON/);
+  assert.ok(last(pi).models.some((m) => m.id === "moonshotai/kimi-k3.1-pro"));
+  const saved = JSON.parse(readFileSync(file, "utf8"));
+  assert.equal(saved.catalogFallback, true);
+  assert.deepEqual(saved.hide, ["x/y"]);
+  await pi.commands["nim-models"].handler("", ctx);
+  assert.match(ctx.notes.at(-1).m, /Catalog fallback.*: ON/);
+  await pi.commands["nim-catalog"].handler("off", ctx);
+  assert.ok(!last(pi).models.some((m) => m.id === "moonshotai/kimi-k3.1-pro"));
+  assert.equal(JSON.parse(readFileSync(file, "utf8")).catalogFallback, false);
   writeFileSync(file, JSON.stringify({ freeModelsOnly: true }));
 });

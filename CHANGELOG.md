@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.10.0
+
+### Added
+- **`/nim-catalog [on|off]`**: switch the catalog fallback (models the API does not list) from inside Pi; saved to `nvidia-nim.json` with your other keys. `/nim-models` shows its state.
+- **Release flow**: CI on every push/PR, and a tag-triggered GitHub release (tests, tag/version/changelog checks, `.tgz` + `.zip` attachments, optional npm publish). `npm run release -- <version>` does the checks, bump, commit and tag. See `RELEASING.md`.
+
+## 0.9.0
+
+### Fixed
+- **Preview-only models listed by the API but not callable** (e.g. `kimi-k3.1-pro`, whose page says "API access for this model is not available yet ... published for preview and playground use only"). Every model page that is read for its context length is also checked for that notice; matching models are hidden and listed in `/nim-models` ("Hidden because their page says API access is not available"). Rechecked every 2 days, so a model appears once NVIDIA opens it. A `"show"` entry overrides.
+
+### Changed
+- **The website catalog is now opt-in.** By default only `/v1/models` is used (plus the per-model page check above). Set `"catalogFallback": true` to add catalog models the API does not list, or use the free filter (`/nim-free on`), which needs the catalog anyway. The 0.8.0 fallback only runs in those cases.
+
+## 0.8.0
+
+### Changed
+- **API first, website as fallback.** `/v1/models` is the primary list. Chat models that NVIDIA's free catalog offers but `/v1/models` does not return yet (the website runs ahead of the API) are now added automatically: their API id is read from the model page's code sample (only an id from the same publisher that agrees with the route is accepted; otherwise the route is used with `_` read as `.` and flagged "id guessed"), and their context length comes from the same page. Works in both filter modes; the catalog is best effort in "all" mode and previously resolved ids are reused when it is unreachable.
+- Context-length page lookups now use the catalog route for every model in both modes.
+- `extraModels` remains as a manual override for an id that cannot be resolved.
+
+## 0.7.1
+
+### Added
+- **`"extraModels": ["vendor/model"]`** in `nvidia-nim.json`: lists models that NVIDIA's website offers but `/v1/models` does not return yet (e.g. `moonshotai/kimi-k3.1-pro`). They are always shown, in either filter mode.
+- `/nim-models` now reports free-list chat models missing from `/v1/models`, with the likely API id.
+
+## 0.7.0
+
+### Changed
+- **The API decides what is listed.** Previously a model was hidden unless a scraped build.nvidia.com page matched it, so any naming mismatch silently dropped new releases (this is why `kimi-k3.1-pro` was missing). Now every chat model in `/v1/models` is listed by default. The free-endpoint filter is opt-in (`"freeModelsOnly": true` or `/nim-free on`).
+- New `"show"` / `"hide"` id lists in `nvidia-nim.json` override both the filter and the non-chat heuristic.
+
+## 0.6.1
+
+### Fixed
+- **New Kimi K3.x models (e.g. `moonshotai/kimi-k3.1-pro`) missing in free-only mode.** The website lists one page for the line (`moonshotai/kimi-k3`) while the API id is the concrete release; matching now accepts a same-publisher id that extends the route slug when nothing matches more precisely.
+- Kimi K3+ now gets the Kimi thinking switch (family regex only covered K2.5/K2.6).
+- Free catalog pagination always probes page 2 (was skipped when page 1 had fewer than 90 routes).
+
 ## 0.6.0
 
 ### Fixed

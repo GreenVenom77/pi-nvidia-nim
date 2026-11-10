@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x # tests run TypeScript directly; needs Node 22.18+
+      - run: npm test
+      - name: Package builds and contains what Pi needs
+        run: |
+          npm pack --dry-run 2>&1 | tee pack.log
+          grep -q "src/index.ts" pack.log

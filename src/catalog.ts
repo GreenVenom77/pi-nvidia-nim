@@ -122,7 +122,27 @@ export function matchFreeIds(routes: Iterable<string>, apiIds: string[]): MatchR
       matched.add(candidates[0]);
       routeById.set(candidates[0], route);
     } else {
-      unmatched.push(route);
+      // The website often keeps one page for a model line (`moonshotai/kimi-k3`) while the API lists the
+      // concrete release (`moonshotai/kimi-k3.1-pro`). Accept a same-publisher id that extends the route
+      // slug at a separator boundary, but only when nothing matched the route more precisely.
+      const stem = normalizeKey(slug);
+      const extended = stem.length >= 4
+        ? apiIds.filter((id) => {
+            const [pub, ...restParts] = id.split("/");
+            if (normalizeKey(pub ?? "") !== normalizeKey(publisher)) return false;
+            const rest = restParts.join("/").toLowerCase();
+            const lowerSlug = slug.toLowerCase();
+            return rest.startsWith(lowerSlug) && /^[-._]/.test(rest.slice(lowerSlug.length));
+          })
+        : [];
+      if (extended.length > 0) {
+        extended.forEach((id) => {
+          matched.add(id);
+          routeById.set(id, route);
+        });
+      } else {
+        unmatched.push(route);
+      }
     }
   }
   return { matched, unmatched, routeById };
@@ -242,18 +262,29 @@ export function positiveNumber(value: unknown, fallback: number): number {
  * Build Pi model definitions. `allowed`, when given, restricts output to those
  * ids. Models that are not chat-capable are always dropped.
  */
+export type ModelOverrides = {
+  /** Lowercase ids that are always listed, even if the free filter or the non-chat heuristic would drop them. */
+  show?: Set<string>;
+  /** Lowercase ids that are never listed. */
+  hide?: Set<string>;
+};
+
 export function toPiModels(
   apiModels: NimApiModel[],
   allowed?: Set<string>,
   meta: Record<string, ModelMeta> = {},
+  overrides: ModelOverrides = {},
 ): any[] {
   const seen = new Set<string>();
   const models: any[] = [];
   for (const model of apiModels) {
     const id = model.id?.trim();
     if (!id || seen.has(id)) continue;
-    if (allowed && !allowed.has(id)) continue;
-    if (!isChatModelId(id)) continue;
+    const lowerId = id.toLowerCase();
+    if (overrides.hide?.has(lowerId)) continue;
+    const forced = overrides.show?.has(lowerId) === true;
+    if (!forced && allowed && !allowed.has(id)) continue;
+    if (!forced && !isChatModelId(id)) continue;
     seen.add(id);
     const known = meta[id.toLowerCase()];
     // Precedence: what NVIDIA's API says, then models.dev, then a default.
@@ -407,7 +438,7 @@ export const THINKING_CONFIGS: Record<string, ThinkingConfig> = {
 const FAMILY_CONFIGS: Array<[RegExp, ThinkingConfig]> = [
   [/^z-ai\/glm-?[45](?:[._-]|$)/, GLM],
   [/^deepseek-ai\/deepseek-v4/, DEEPSEEK_V4],
-  [/^moonshotai\/kimi-k2[._-]?[56]/, KIMI],
+  [/^moonshotai\/kimi-k(?:2[._-]?[56]|[3-9])/, KIMI],
   // Qwen3.5: NVIDIA's API reference documents chat_template_kwargs {"enable_thinking": true|false}.
   [/^qwen\/qwen3[._-]?5(?:[._-]|$)/, ENABLE_THINKING],
   [/^nvidia\/nemotron-3-/, NEMOTRON_3],
@@ -752,4 +783,50 @@ export function patchPayload(payload: any, modelId: string, reasoning: string | 
   flattenTextContent(payload.messages);
   if (config?.systemToggle) applySystemToggle(payload, reasoning ? config.systemToggle.on : config.systemToggle.off);
   sanitizeToolCallArguments(payload.messages);
+}
+
+/** Read a settings array of model ids ("show" / "hide") into a lowercase set. Bad entries are ignored. */
+export function parseIdList(raw: unknown): Set<string> {
+  const out = new Set<string>();
+  if (!Array.isArray(raw)) return out;
+  for (const value of raw) if (typeof value === "string" && value.trim()) out.add(value.trim().toLowerCase());
+  return out;
+}
+
+/** Settings array of exact model ids to add even when /v1/models does not list them (the website is often ahead of the API). */
+export function parseExtraModels(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const ids = raw.filter((value): value is string => typeof value === "string" && /^[^\s/]+\/[^\s/]+$/.test(value.trim())).map((value) => value.trim());
+  return [...new Set(ids)];
+}
+
+/** Catalog routes that look like chat models but are absent from /v1/models, with the id the API most likely uses. */
+export function catalogOnlyChatSuggestions(unmatched: string[]): string[] {
+  return unmatched.filter(isChatModelId).map((route) => route.replace(/_/g, "."));
+}
+
+/**
+ * Read the API id a model page uses in its code sample (`"model": "moonshotai/kimi-k3.1-pro"`).
+ * Only an id from the route's own publisher whose name agrees with the route is accepted, so an
+ * unrelated model mentioned on the page can never be picked up.
+ */
+export function parseCardModelId(markdown: string, route: string): string | undefined {
+  const [publisher, slug] = route.toLowerCase().split("/");
+  if (!publisher || !slug) return undefined;
+  const wanted = normalizeKey(slug);
+  for (const match of markdown.matchAll(/["']?model["']?\s*[:=]\s*["']([A-Za-z0-9][\w.-]*\/[\w.-]+)["']/gi)) {
+    const [pub, name] = match[1].split("/");
+    if (normalizeKey(pub) !== normalizeKey(publisher)) continue;
+    const got = normalizeKey(name);
+    if (got === wanted || got.startsWith(wanted) || wanted.startsWith(got)) return match[1];
+  }
+  return undefined;
+}
+
+/**
+ * Some model pages are preview/playground only: the page says API access is not available and no key will work,
+ * even though /v1/models may still list the id. Such a model can never answer a request, so it should not be offered.
+ */
+export function parseApiUnavailable(markdown: string): boolean {
+  return /API access (?:for this model )?is not (?:available|open)|not open for programmatic access|no API key will authorize|published for preview and playground use only/i.test(markdown);
 }

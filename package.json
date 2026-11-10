@@ -1,7 +1,7 @@
 {
-  "name": "pi-nvidia-nim",
-  "version": "0.6.0",
-  "description": "Pi provider extension for NVIDIA NIM with live model discovery, chat-only filtering, a default-on free-endpoint filter, and offline fallback.",
+  "name": "pi-nvidia-nim-reimagined",
+  "version": "0.10.0",
+  "description": "Pi provider extension for NVIDIA NIM with live model discovery and web scraping fallback.",
   "license": "MIT",
   "type": "module",
   "keywords": [
@@ -11,7 +11,9 @@
     "nim"
   ],
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "release": "node scripts/release.mjs",
+    "release:notes": "node scripts/release-notes.mjs"
   },
   "pi": {
     "extensions": [
@@ -20,5 +22,10 @@
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
-  }
+  },
+  "files": [
+    "src",
+    "README.md",
+    "CHANGELOG.md"
+  ]
 }
