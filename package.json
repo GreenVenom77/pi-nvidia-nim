@@ -1,5 +1,5 @@
 {
-  "name": "pi-nvidia-nim-reimagined",
+  "name": "pi-nvidia-nim",
   "version": "0.10.3",
   "description": "Pi provider extension for NVIDIA NIM with live model discovery and web scraping fallback.",
   "license": "MIT",

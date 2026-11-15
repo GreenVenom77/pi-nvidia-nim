@@ -1,4 +1,4 @@
-# pi-nvidia-nim-reimagined
+# pi-nvidia-nim
 
 NVIDIA NIM provider for [Pi](https://pi.dev) with live model discovery, an optional free-endpoint filter, accurate context windows, and thinking levels that actually work.
 
@@ -28,7 +28,7 @@ NVIDIA NIM provider for [Pi](https://pi.dev) with live model discovery, an optio
 Pi installs straight from GitHub. No npm publish and no manual copying.
 
 ```bash
-pi install git:github.com/GreenVenom77/pi-nvidia-nim-reimagined
+pi install git:github.com/GreenVenom77/pi-nvidia-nim
 ```
 
 Then restart Pi or run `/reload`, and pick a model from provider `nvidia-nim` with `/model`.
@@ -38,7 +38,7 @@ Manage it:
 ```bash
 pi list                    # show installed packages
 pi update --extensions     # reconcile installed packages
-pi remove git:github.com/GreenVenom77/pi-nvidia-nim-reimagined
+pi remove git:github.com/GreenVenom77/pi-nvidia-nim
 ```
 
 Add `--local` (`-l`) to `pi install` to declare it for the current project only, in `.pi/settings.json`. Pi loads project packages only after you trust the project.
