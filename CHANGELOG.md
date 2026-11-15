@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.10.3
+
+### Fixed
+- **Release package extraction failing due to npm tarball naming mismatch.** The release workflow now captures the actual filename returned by `npm pack` instead of assuming it matches the GitHub release artifact name.
+- **Changelog missing changes from other commits.** Corrected the release changelog process to ensure changes from all relevant commits are included rather than documenting only a subset of the changes made between releases.
+
+### Changed
+- **Release artifacts:** The generated `.tgz` and `.zip` files retain the consistent `pi-nvidia-nim-VERSION` naming convention, independently of the npm package name.
+
+## 0.10.2
+
+### Changed
+- Updated the package version to `0.10.2`.
+
+## 0.10.1
+
+### Fixed
+- **Release GitHub Actions workflow.** Updated `actions/checkout` and `actions/setup-node` to v7.
+- Fixed package extraction logic in preparation for correcting the npm tarball filename mismatch.
+
 ## 0.10.0
 
 ### Added
