@@ -1,6 +1,6 @@
 {
   "name": "pi-nvidia-nim-reimagined",
-  "version": "0.10.0",
+  "version": "0.10.2",
   "description": "Pi provider extension for NVIDIA NIM with live model discovery and web scraping fallback.",
   "license": "MIT",
   "type": "module",
